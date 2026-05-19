@@ -31,18 +31,30 @@ function CanvasOverlay({ data, step }) {
 
   const { lats, lons, t2m } = data
 
+  // Find the split index where lon >= 180 (these become negative longitudes)
+  const splitIdx = useMemo(() => {
+    for (let i = 0; i < lons.length; i++) {
+      if (lons[i] >= 180) return i
+    }
+    return 0
+  }, [lons])
+
   // Build the offscreen image for the current timestep
+  // Remap columns: [180..360, 0..180] so output matches -180→180
   const imageData = useMemo(() => {
     const h = lats.length   // 181
     const w = lons.length   // 360
     const frame = t2m[step]
     const buf = new Uint8ClampedArray(w * h * 4)
+    const rightHalf = w - splitIdx  // number of pixels from 180°..360°
 
     for (let y = 0; y < h; y++) {
       const row = frame[y]
       for (let x = 0; x < w; x++) {
+        // source column: first draw rightHalf pixels (lon>=180), then the rest
+        const srcX = x < rightHalf ? x + splitIdx : x - rightHalf
         const idx = (y * w + x) * 4
-        const li = tempToLutIndex(row[x])
+        const li = tempToLutIndex(row[srcX])
         buf[idx] = LUT[li * 4]
         buf[idx + 1] = LUT[li * 4 + 1]
         buf[idx + 2] = LUT[li * 4 + 2]
@@ -50,7 +62,7 @@ function CanvasOverlay({ data, step }) {
       }
     }
     return new ImageData(buf, w, h)
-  }, [step, lats, lons, t2m])
+  }, [step, lats, lons, t2m, splitIdx])
 
   // Create canvas + overlay once
   useEffect(() => {
@@ -58,9 +70,10 @@ function CanvasOverlay({ data, step }) {
     canvas.style.imageRendering = 'pixelated'
     canvasRef.current = canvas
 
-    const southWest = L.latLng(lats[lats.length - 1], lons[0])
-    const northEast = L.latLng(lats[0], lons[lons.length - 1])
-    const bounds = L.latLngBounds(southWest, northEast)
+    const bounds = L.latLngBounds(
+      L.latLng(-90, -180),
+      L.latLng(90, 180)
+    )
 
     const overlay = L.imageOverlay(canvas.toDataURL(), bounds, {
       opacity: 0.85,
