@@ -1,4 +1,4 @@
-import { useRef, useEffect, useMemo } from 'react'
+import { useRef, useEffect, useMemo, useState, useCallback } from 'react'
 import { MapContainer, TileLayer, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import chroma from 'chroma-js'
@@ -24,6 +24,10 @@ function tempToLutIndex(t) {
   return Math.round(((t + 55) / 100) * 1000)
 }
 
+// Oversample factor — extend canvas beyond [-90,90]x[-180,180] to bleed past viewport edges
+const PAD_LAT = 10
+const PAD_LNG = 30
+
 function CanvasOverlay({ data, step }) {
   const map = useMap()
   const canvasRef = useRef(null)
@@ -41,19 +45,44 @@ function CanvasOverlay({ data, step }) {
 
   // Build the offscreen image for the current timestep
   // Remap columns: [180..360, 0..180] so output matches -180→180
+  // Add padding rows/columns by clamping to edge values for full-bleed
   const imageData = useMemo(() => {
     const h = lats.length   // 181
     const w = lons.length   // 360
     const frame = t2m[step]
-    const buf = new Uint8ClampedArray(w * h * 4)
-    const rightHalf = w - splitIdx  // number of pixels from 180°..360°
+    const rightHalf = w - splitIdx
 
-    for (let y = 0; y < h; y++) {
-      const row = frame[y]
-      for (let x = 0; x < w; x++) {
-        // source column: first draw rightHalf pixels (lon>=180), then the rest
-        const srcX = x < rightHalf ? x + splitIdx : x - rightHalf
-        const idx = (y * w + x) * 4
+    // Extra padding pixels based on degrees / resolution
+    const latStep = Math.abs(lats[1] - lats[0])  // ~1°
+    const lonStep = Math.abs(lons[1] - lons[0])  // ~1°
+    const padY = Math.ceil(PAD_LAT / latStep)
+    const padX = Math.ceil(PAD_LNG / lonStep)
+
+    const outW = w + padX * 2
+    const outH = h + padY * 2
+    const buf = new Uint8ClampedArray(outW * outH * 4)
+
+    for (let oy = 0; oy < outH; oy++) {
+      // Clamp source row to valid range
+      const sy = Math.max(0, Math.min(h - 1, oy - padY))
+      const row = frame[sy]
+      for (let ox = 0; ox < outW; ox++) {
+        // Map output column back to the remapped source column
+        const mx = ox - padX  // column in the original w-wide image
+        let srcX
+        if (mx < 0) {
+          // Left padding — wrap around to the right edge
+          srcX = ((mx % w) + w) % w
+        } else if (mx >= w) {
+          // Right padding — wrap around to the left edge
+          srcX = mx % w
+        } else {
+          srcX = mx
+        }
+        // Apply the 0→360 to -180→180 remap
+        srcX = srcX < rightHalf ? srcX + splitIdx : srcX - rightHalf
+
+        const idx = (oy * outW + ox) * 4
         const li = tempToLutIndex(row[srcX])
         buf[idx] = LUT[li * 4]
         buf[idx + 1] = LUT[li * 4 + 1]
@@ -61,7 +90,7 @@ function CanvasOverlay({ data, step }) {
         buf[idx + 3] = LUT[li * 4 + 3]
       }
     }
-    return new ImageData(buf, w, h)
+    return new ImageData(buf, outW, outH)
   }, [step, lats, lons, t2m, splitIdx])
 
   // Create canvas + overlay once
@@ -70,14 +99,16 @@ function CanvasOverlay({ data, step }) {
     canvas.style.imageRendering = 'pixelated'
     canvasRef.current = canvas
 
+    // Extend bounds beyond the globe so edges bleed off-screen
     const bounds = L.latLngBounds(
-      L.latLng(-90, -180),
-      L.latLng(90, 180)
+      L.latLng(-90 - PAD_LAT, -180 - PAD_LNG),
+      L.latLng(90 + PAD_LAT, 180 + PAD_LNG)
     )
 
     const overlay = L.imageOverlay(canvas.toDataURL(), bounds, {
       opacity: 0.85,
       interactive: false,
+      className: 'heatmap-overlay',
     })
     overlay.addTo(map)
     overlayRef.current = overlay
@@ -104,6 +135,87 @@ function CanvasOverlay({ data, step }) {
   return null
 }
 
+function HoverTooltip({ data, step }) {
+  const map = useMap()
+  const [tooltip, setTooltip] = useState(null)
+  const { lats, lons, t2m } = data
+
+  const onMouseMove = useCallback((e) => {
+    let lat = e.latlng.lat
+    let lng = e.latlng.lng
+
+    // Clamp latitude
+    if (lat < -90 || lat > 90) {
+      setTooltip(null)
+      return
+    }
+
+    // Normalize longitude to -180..180
+    lng = ((lng + 180) % 360 + 360) % 360 - 180
+
+    // Convert map lng (-180..180) to data lng (0..360)
+    const dataLng = lng < 0 ? lng + 360 : lng
+
+    // Find nearest lat index (lats go 90 → -90)
+    const latIdx = Math.round((90 - lat) / (180 / (lats.length - 1)))
+    // Find nearest lon index (lons go 0 → ~359)
+    const lonStep = lons[1] - lons[0]
+    const lonIdx = Math.round(dataLng / lonStep) % lons.length
+
+    const clampedLatIdx = Math.max(0, Math.min(lats.length - 1, latIdx))
+    const clampedLonIdx = Math.max(0, Math.min(lons.length - 1, lonIdx))
+
+    const temp = t2m[step][clampedLatIdx][clampedLonIdx]
+
+    setTooltip({
+      x: e.containerPoint.x,
+      y: e.containerPoint.y,
+      lat: lat.toFixed(1),
+      lng: lng.toFixed(1),
+      temp: temp.toFixed(1),
+    })
+  }, [lats, lons, t2m, step])
+
+  const onMouseOut = useCallback(() => {
+    setTooltip(null)
+  }, [])
+
+  useEffect(() => {
+    map.on('mousemove', onMouseMove)
+    map.on('mouseout', onMouseOut)
+    return () => {
+      map.off('mousemove', onMouseMove)
+      map.off('mouseout', onMouseOut)
+    }
+  }, [map, onMouseMove, onMouseOut])
+
+  if (!tooltip) return null
+
+  return (
+    <div style={{
+      position: 'absolute',
+      left: tooltip.x + 14,
+      top: tooltip.y - 44,
+      zIndex: 1000,
+      background: 'rgba(13, 17, 23, 0.92)',
+      backdropFilter: 'blur(10px)',
+      border: '1px solid rgba(99, 110, 123, 0.3)',
+      borderRadius: 8,
+      padding: '8px 12px',
+      pointerEvents: 'none',
+      whiteSpace: 'nowrap',
+      boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+    }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3', marginBottom: 2 }}>
+        {tooltip.temp}°C
+      </div>
+      <div style={{ fontSize: 11, color: '#8b949e' }}>
+        {tooltip.lat}°{tooltip.lat >= 0 ? 'N' : 'S'}, {tooltip.lng}°{tooltip.lng >= 0 ? 'E' : 'W'}
+      </div>
+    </div>
+  )
+}
+
 export default function MapView({ data, step }) {
   return (
     <MapContainer
@@ -121,6 +233,7 @@ export default function MapView({ data, step }) {
         subdomains="abcd"
       />
       <CanvasOverlay data={data} step={step} />
+      <HoverTooltip data={data} step={step} />
     </MapContainer>
   )
 }
