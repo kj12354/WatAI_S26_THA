@@ -1,51 +1,79 @@
-# `weatherloo` take-home project
+# Weatherloo — ERA5 2m Temperature Visualization
 
-Estimated time: 30-60 minutes
+**Live demo: https://wat-ai-s26-tha.vercel.app/**
 
-## Instructions
+A 120-hour global temperature visualization built with React, Leaflet, and the ERA5 reanalysis dataset.
 
-You'll be working with a real-world weather dataset called ERA5 - it's a massive historical record of the Earth's atmosphere. It tracks information like temperature, wind, humidity, (and so much more), measured at thousands of points across the globe, every few hours. ERA5 is our best estimate of what the atmosphere actually looked like at any given moment in time, and it's used as the foundation for many modern AI weather models.
+---
 
-The specific dataset is hosted here:
-https://console.cloud.google.com/storage/browser/gcp-public-data-arco-era5/ar/1959-2022-6h-1440x721.zarr
+## Task 1: Variable — 2m Temperature
 
-Your goal is to pick one of those weather measurements and visualize how it changes over a 120-hour period across the globe.
+- **What it is:** The air temperature 2 metres above the Earth's surface — essentially what you'd feel if you stepped outside. It's the standard way meteorologists report "the temperature" for a location.
+- **Type:** Single-level (surface) variable. No pressure level dimension — it's always measured at the same fixed height.
+- **Abbreviation:** `t2m` (also called `2m_temperature` in this dataset). Units are Kelvin in the raw data; converted to Celsius for display.
 
-### Task 1: Choose a weather variable
+I picked this because it's the most immediately intuitive weather variable — you can look at the map and instantly tell where it's hot, cold, and how temperature shifts with the day/night cycle.
 
-Pick any weather variable from the dataset that interests you. In a short paragraph (a few sentences is fine!) or bullet points, write 
-- An ELI5-style explanation of what it represents physically
-- Whether it's a single-level variable (e.g. surface temperature) or one associated with pressure levels (e.g. wind at different altitudes in the atmosphere)
-- Common abbreviation(s) for the variable
+---
 
-### Task 2: Plot the variable
+## Task 2: Visualization
 
-Using the dataset above, create a visualization of your chosen variable over a 120-hour window. If your variable has multiple pressure levels, just pick one.
+### What it shows
 
-How you present the visualization is completely up to you - a matplotlib animation, an interactive globe, a small web app, whatever you think is cool. Just include a note on how to run it.
+A full-screen interactive world map displaying global 2m temperature as a color heatmap, animating through 20 timesteps (every 6 hours from Jan 15–19, 2020).
 
-If you want, you can explain any design decisions you made along the way (a sentence or two/bullet points are fine!).
+### Features
 
-### Task 3: Dataset understanding
+- **Heatmap overlay** — canvas-rendered temperature field on a dark CartoDB basemap. Color scale runs from deep blue (-55C) through white to deep red (45C).
+- **Time controls** — play/pause button auto-advances every 500ms; slider to scrub to any timestep.
+- **Hover tooltip** — mouse over any point to see exact lat/lon and temperature.
+- **Color legend** — fixed in the bottom-right corner.
 
-Answer the following questions:
-1. What is the time step of the dataset? ("How often does this dataset take a snapshot of the world?")
-2. What timezone/time standard does the dataset use?
-3. What do the numbers 1440x721 refer to?
-4. What is zarr?
+### How to run locally
 
-### Submitting
+```bash
+cd viz
+npm install
+npm run dev
+# opens at http://localhost:5173
+```
 
-Preferably a GitHub repo but anything works.
+### Design decisions
 
-## Goals of this project
+- **Canvas + ImageOverlay over tiled raster:** The downsampled grid (360x181) is small enough to render as a single `ImageData` per frame. A pre-computed color lookup table (1001 entries) makes the per-pixel loop fast — no chroma-js calls at render time.
+- **Longitude remapping:** ERA5 stores longitudes as 0-360. The pixel columns are swapped at render time so the overlay aligns with Leaflet's -180 to 180 coordinate system.
+- **Gzipped JSON:** The full 20-frame dataset compresses to 3.1 MB (pako decompresses in-browser), keeping load times fast on Vercel.
 
-- Getting comfortable working with real weather data (similar to what you'd work with on the team!)
-- Learning something new about the atmosphere
-- Showing us how you approach an open-ended problem
+---
 
-## Notes
-- We fully support using AI tools — if you do, feel free to note the prompts or tools that you used.
-    - We'd prefer if your write-ups are clear and concise. If you choose to use AI to help you write, keep clear communication in mind.
-- Don't stress too much about the visualization. There's no single right answer.
-- If you have any questions, reach out to @ayaonic or @cindehaa on Discord — we're happy to help!
+## Task 3: Dataset Understanding
+
+**1. What is the time step?**
+
+6 hours. The dataset captures a snapshot of the global atmosphere four times per day (00:00, 06:00, 12:00, 18:00).
+
+**2. What timezone/time standard?**
+
+UTC (Coordinated Universal Time). All timestamps in ERA5 are in UTC with no timezone offset.
+
+**3. What do the numbers 1440x721 refer to?**
+
+The spatial grid dimensions — 1440 longitude points and 721 latitude points. At 0.25 degree spacing, 1440 points cover 360 degrees of longitude (360 / 0.25 = 1440) and 721 points cover 180 degrees of latitude from pole to pole inclusive (180 / 0.25 + 1 = 721).
+
+**4. What is zarr?**
+
+Zarr is a chunked, compressed array storage format designed for large N-dimensional datasets. Instead of storing one massive file, it breaks data into chunks that can be read independently — which means you can fetch just the slice you need (e.g., one variable for one week) without downloading the entire multi-terabyte dataset. It works well with cloud storage (like GCS) and tools like xarray.
+
+---
+
+## Project Structure
+
+```
+explore_era5.py    # Opens the zarr store, prints metadata (variables, dims, resolution)
+fetch_era5.py      # Fetches 120hr slice of t2m, downsamples, exports to gzipped JSON
+viz/               # React web app (Vite + Leaflet + canvas overlay)
+```
+
+## AI Tools
+
+I used Claude throughout this project — for exploring the ERA5 dataset structure, writing the data fetch/export scripts, building the React visualization, and debugging the heatmap alignment (longitude remapping from 0-360 to -180-180).
