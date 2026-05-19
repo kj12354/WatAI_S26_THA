@@ -25,7 +25,7 @@ function tempToLutIndex(t) {
 }
 
 // Oversample factor — extend canvas beyond [-90,90]x[-180,180] to bleed past viewport edges
-const PAD_LAT = 30
+const PAD_LAT = 60
 const PAD_LNG = 60
 
 function CanvasOverlay({ data, step }) {
